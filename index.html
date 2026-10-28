@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Calculadora Método Simplex</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f7f6; color: #333; margin: 0; padding: 20px; }
+        .container { max-width: 900px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }
+        h1 { text-align: center; color: #2c3e50; }
+        label { font-weight: bold; display: block; margin-top: 15px; margin-bottom: 5px; color: #34495e; }
+        select, input, textarea { width: 100%; padding: 10px; font-size: 16px; border: 1px solid #ccc; border-radius: 5px; box-sizing: border-box; }
+        textarea { resize: vertical; min-height: 100px; font-family: monospace; }
+        button { background-color: #27ae60; color: white; border: none; padding: 15px; font-size: 18px; font-weight: bold; width: 100%; border-radius: 5px; cursor: pointer; margin-top: 20px; transition: background 0.3s; }
+        button:hover { background-color: #219150; }
+        .hint { font-size: 13px; color: #7f8c8d; margin-top: 2px; }
+        #output { margin-top: 30px; padding: 20px; background: #eef2f3; border-radius: 5px; display: none; }
+        .log-line { margin-bottom: 5px; font-family: monospace; font-size: 15px; }
+        .section-title { font-weight: bold; color: #2980b9; margin-top: 20px; margin-bottom: 10px; font-size: 18px; border-bottom: 1px solid #bdc3c7; padding-bottom: 5px;}
+        table { width: 100%; border-collapse: collapse; margin: 15px 0; background: white; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; text-align: center;}
+        th, td { border: 1px solid #bdc3c7; padding: 8px; }
+        th { background-color: #34495e; color: white; }
+        .error { color: #c0392b; font-weight: bold; padding: 10px; border: 1px solid #e74c3c; background: #fadbd8; border-radius: 5px;}
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>Método Simplex</h1>
+    
+    <label>¿Qué deseas hacer?</label>
+    <select id="tipo">
+        <option value="max">Maximizar (Zmax)</option>
+        <option value="min">Minimizar (Zmin)</option>
+    </select>
+
+    <label>Función Objetivo (Z):</label>
+    <input type="text" id="fo" placeholder="Ejemplo: 3x1 + 5x2" value="3x1 + 5x2">
+    <div class="hint">Escribe las variables usando x1, x2, x3... No escribas "Z ="</div>
+
+    <label>Restricciones:</label>
+    <textarea id="rest" placeholder="2x1 + x2 <= 8&#10;3x1 + 2x2 <= 12">2x1 + x2 <= 8
+3x1 + 2x2 <= 12</textarea>
+    <div class="hint">Una por línea. Usa &lt;=. (No incluyas la restricción de no-negatividad x>=0)</div>
+
+    <button onclick="ejecutar()">Resolver Problema</button>
+
+    <div id="output"></div>
+</div>
+
+<script>
+    // --- LÓGICA DE FRACCIONES (Traducida de tu Java 'Fr') ---
+    class Fr {
+        constructor(num, den) {
+            num = BigInt(num); den = BigInt(den);
+            if (den < 0n) { num = -num; den = -den; }
+            let g = Fr.gcd(num < 0n ? -num : num, den);
+            this.n = num / g;
+            this.d = den / g;
+        }
+        static gcd(a, b) { return b === 0n ? a : Fr.gcd(b, a % b); }
+        plus(o)  { return new Fr(this.n * o.d + o.n * this.d, this.d * o.d); }
+        times(o) { return new Fr(this.n * o.n, this.d * o.d); }
+        div(o)   { return new Fr(this.n * o.d, this.d * o.n); }
+        neg()    { return new Fr(-this.n, this.d); }
+        abs()    { return this.n < 0n ? this.neg() : this; }
+        sign()   { return this.n < 0n ? -1 : (this.n > 0n ? 1 : 0); }
+        esUno()  { return this.n === 1n && this.d === 1n; }
+        cmp(o)   {
+            let diff = this.n * o.d - o.n * this.d;
+            return diff < 0n ? -1 : (diff > 0n ? 1 : 0);
+        }
+        toString() { return this.d === 1n ? this.n.toString() : `${this.n}/${this.d}`; }
+
+        static parse(s) {
+            s = s.trim();
+            if (s.includes("/")) {
+                let p = s.split("/");
+                if(BigInt(p[1]) === 0n) throw new Error("División entre cero");
+                return new Fr(BigInt(p[0]), BigInt(p[1]));
+            }
+            if (s.includes(".")) {
+                let parts = s.split(".");
+                let num = BigInt(parts[0] + parts[1]);
+                let den = 10n ** BigInt(parts[1].length);
+                return new Fr(num, den);
+            }
+            return new Fr(BigInt(s), 1n);
+        }
+    }
+    const CERO = new Fr(0n, 1n);
+    const UNO = new Fr(1n, 1n);
+
+    // --- VARIABLES GLOBALES DEL SIMPLEX ---
+    let esMax, n, m, idx, varX, cOrig, c, A, b, T, nombres, base;
+    let outputDiv;
+
+    // --- FUNCIONES DE UTILIDAD Y PARSEO ---
+    function log(text, isTitle = false) {
+        let div = document.createElement("div");
+        div.className = isTitle ? "section-title" : "log-line";
+        div.innerText = text;
+        outputDiv.appendChild(div);
+    }
+
+    function logHtml(html) {
+        let div = document.createElement("div");
+        div.innerHTML = html;
+        outputDiv.appendChild(div);
+    }
+
+    function parseLado(s, mapa, signo) {
+        if (!s) throw new Error("Falta una expresión.");
+        let constante = CERO;
+        let pos = 0;
+        const TERM = /^([+-]?)(\d+(?:\.\d+)?(?:\/\d+)?)?(?:\*?x(\d+))?/;
+        
+        while (pos < s.length) {
+            let match = s.substring(pos).match(TERM);
+            if (!match || match[0].length === 0) throw new Error("No entendí: " + s.substring(pos));
+            
+            let full = match[0], sg = match[1], num = match[2], varX = match[3];
+            if (!num && !varX) throw new Error("No entendí: " + s.substring(pos));
+            if (pos > 0 && sg === "") throw new Error("Falta un + o - antes de " + s.substring(pos));
+
+            let v = !num ? UNO : Fr.parse(num);
+            if (sg === "-") v = v.neg();
+            if (signo < 0) v = v.neg();
+
+            if (!varX) {
+                constante = constante.plus(v);
+            } else {
+                let id = parseInt(varX);
+                mapa[id] = (mapa[id] || CERO).plus(v);
+            }
+            pos += full.length;
+        }
+        return constante;
+    }
+
+    function expr(co, vars) {
+        let parts = [];
+        for (let j = 0; j < co.length; j++) {
+            if (co[j].sign() === 0) continue;
+            let val = co[j].abs();
+            let sg = co[j].sign() < 0 ? "-" : (parts.length === 0 ? "" : "+");
+            let numStr = val.esUno() ? "" : (val.d === 1n ? val.n.toString() : `(${val})`);
+            if (sg) parts.push(sg);
+            parts.push(numStr + vars[j]);
+        }
+        return parts.length === 0 ? "0" : parts.join(" ");
+    }
+
+    // --- FLUJO PRINCIPAL ---
+    function ejecutar() {
+        outputDiv = document.getElementById("output");
+        outputDiv.innerHTML = "";
+        outputDiv.style.display = "block";
+        
+        try {
+            leerDatos();
+            
+            let tipoStr = esMax ? "Zmax" : "Zmin";
+            log("--- PROBLEMA ---", true);
+            log(tipoStr + " = " + expr(cOrig, varX));
+            log("Sujeto a:");
+            for (let i = 0; i < m; i++) log("   " + expr(A[i], varX) + " <= " + b[i]);
+            log("   " + varX.join(", ") + " >= 0");
+
+            if (!esMax) {
+                log("\nComo es MINIMIZAR, se resuelve maximizando -Z:");
+                log("   Zmax = -(Zmin) = " + expr(c, varX));
+            }
+
+            construirTabla();
+            log("--- PASO 3: Tabla simplex inicial ---", true);
+            mostrarTabla();
+
+            resolver();
+        } catch (e) {
+            let err = document.createElement("div");
+            err.className = "error";
+            err.innerText = "Error: " + e.message;
+            outputDiv.appendChild(err);
+        }
+    }
+
+    function leerDatos() {
+        esMax = document.getElementById("tipo").value === "max";
+        
+        let foStr = document.getElementById("fo").value.toLowerCase().replace(/\s+/g, "").replace(/,/g, ".").replace(/≤/g, "<=").replace(/−/g, "-");
+        let idxIgual = foStr.indexOf('=');
+        if (idxIgual >= 0) foStr = foStr.substring(idxIgual + 1);
+        
+        let zMapa = {};
+        let kfo = parseLado(foStr, zMapa, 1);
+        if (kfo.sign() !== 0) throw new Error("La función objetivo no debe tener un número constante solo.");
+
+        let restLines = document.getElementById("rest").value.split("\n");
+        let rMapas = [];
+        let rhs = [];
+        
+        for (let i = 0; i < restLines.length; i++) {
+            let linea = restLines[i].toLowerCase().replace(/\s+/g, "").replace(/,/g, ".").replace(/≤/g, "<=").replace(/−/g, "-");
+            if (linea === "") continue;
+            if (linea.includes(">=")) throw new Error(`Línea ${i+1}: Solo se aceptan restricciones con <=.`);
+            if (!linea.includes("<=")) throw new Error(`Línea ${i+1}: Falta el <= en la restricción.`);
+            
+            let p = linea.split("<=");
+            if (p.length !== 2) throw new Error(`Línea ${i+1}: Solo puede haber un <=.`);
+            
+            let mapa = {};
+            let cl = parseLado(p[0], mapa, 1);
+            let cr = parseLado(p[1], mapa, -1);
+            let ladoDer = cl.neg().plus(cr.neg());
+            
+            if (ladoDer.sign() < 0) throw new Error(`Línea ${i+1}: El lado derecho queda negativo. Multiplica por -1 o asegúrate de que sea >= 0.`);
+            
+            rMapas.push(mapa);
+            rhs.push(ladoDer);
+        }
+
+        if (rMapas.length === 0) throw new Error("Escribe al menos una restricción.");
+
+        let usadasSet = new Set(Object.keys(zMapa).map(Number));
+        rMapas.forEach(r => Object.keys(r).forEach(k => usadasSet.add(Number(k))));
+        
+        idx = Array.from(usadasSet).sort((a, b) => a - b);
+        n = idx.length;
+        m = rMapas.length;
+        varX = idx.map(v => "x" + v);
+
+        cOrig = new Array(n);
+        c = new Array(n);
+        for (let j = 0; j < n; j++) {
+            cOrig[j] = zMapa[idx[j]] || CERO;
+            c[j] = esMax ? cOrig[j] : cOrig[j].neg();
+        }
+
+        A = Array.from({length: m}, () => new Array(n).fill(CERO));
+        b = new Array(m);
+        for (let i = 0; i < m; i++) {
+            for (let j = 0; j < n; j++) A[i][j] = rMapas[i][idx[j]] || CERO;
+            b[i] = rhs[i];
+        }
+    }
+
+    function construirTabla() {
+        T = Array.from({length: m + 1}, () => new Array(n + m + 1).fill(CERO));
+        nombres = new Array(n + m);
+        base = new Array(m);
+
+        for (let j = 0; j < n; j++) nombres[j] = varX[j];
+        for (let i = 0; i < m; i++) nombres[n + i] = "h" + (i + 1);
+
+        for (let i = 0; i < m; i++) {
+            for (let j = 0; j < n; j++) T[i][j] = A[i][j];
+            T[i][n + i] = UNO;
+            T[i][n + m] = b[i];
+            base[i] = "h" + (i + 1);
+        }
+        for (let j = 0; j < n; j++) T[m][j] = c[j].neg();
+    }
+
+    function mostrarTabla() {
+        let html = '<table><tr><th>Básicas</th><th>Z</th>';
+        for (let s of nombres) html += `<th>${s}</th>`;
+        html += '<th>Solución</th></tr>';
+
+        for (let i = 0; i <= m; i++) {
+            html += `<tr><td><b>${i === m ? 'Z' : base[i]}</b></td><td>${i === m ? '1' : '0'}</td>`;
+            for (let j = 0; j <= n + m; j++) {
+                html += `<td>${T[i][j].toString()}</td>`;
+            }
+            html += `</tr>`;
+        }
+        html += '</table>';
+        logHtml(html);
+    }
+
+    function resolver() {
+        let last = n + m;
+        for (let iter = 1; iter <= 50; iter++) {
+            let neg = [];
+            for (let j = 0; j < last; j++) if (T[m][j].sign() < 0) neg.push(j);
+
+            if (neg.length === 0) {
+                log("¡Solución ÓPTIMA encontrada! Todos los coeficientes de Z son >= 0.", true);
+                resultado();
+                return;
+            }
+
+            let min = T[m][neg[0]];
+            for (let j of neg) if (T[m][j].cmp(min) < 0) min = T[m][j];
+            
+            let cols = neg.filter(j => T[m][j].cmp(min) === 0);
+            let col = cols[0];
+            log(`Iteración ${iter}: Entra '${nombres[col]}' a la base (coeficiente más negativo: ${min}).`, true);
+
+            let minR = null;
+            let ratio = new Array(m).fill(null);
+            for (let i = 0; i < m; i++) {
+                let el = T[i][col];
+                if (el.sign() > 0) {
+                    ratio[i] = T[i][last].div(el);
+                    log(`   ${base[i]}: ${T[i][last]} / ${el} = ${ratio[i]}`);
+                    if (minR === null || ratio[i].cmp(minR) < 0) minR = ratio[i];
+                }
+            }
+
+            if (minR === null) {
+                log("Problema NO ACOTADO (ningún elemento positivo en la columna pivote).", true);
+                return;
+            }
+
+            let filas = [];
+            for (let i = 0; i < m; i++) if (ratio[i] !== null && ratio[i].cmp(minR) === 0) filas.push(i);
+            
+            let fila = filas[0];
+            let piv = T[fila][col];
+            log(`Sale '${base[fila]}' de la base. Elemento pivote: ${piv}.`);
+
+            if (!piv.esUno()) {
+                for (let j = 0; j <= last; j++) T[fila][j] = T[fila][j].div(piv);
+            }
+
+            for (let i = 0; i <= m; i++) {
+                if (i === fila) continue;
+                let factor = T[i][col];
+                if (factor.sign() === 0) continue;
+                let k = factor.neg();
+                for (let j = 0; j <= last; j++) T[i][j] = T[i][j].plus(k.times(T[fila][j]));
+            }
+            base[fila] = nombres[col];
+
+            mostrarTabla();
+        }
+        log("Se alcanzó el máximo de 50 iteraciones.", true);
+    }
+
+    function resultado() {
+        let last = n + m;
+        let tipo = esMax ? "Zmax" : "Zmin";
+
+        log("--- RESULTADOS FINALES ---", true);
+        let x = new Array(n).fill(CERO);
+        for (let j = 0; j < n; j++) {
+            for (let i = 0; i < m; i++) if (base[i] === nombres[j]) x[j] = T[i][last];
+            log(`   ${varX[j]} = ${x[j]}`);
+        }
+
+        let total = CERO;
+        for (let j = 0; j < n; j++) {
+            if (cOrig[j].sign() !== 0) total = total.plus(cOrig[j].times(x[j]));
+        }
+        log(`\n=> ${tipo} = ${total}`, true);
+    }
+</script>
+</body>
+</html>
